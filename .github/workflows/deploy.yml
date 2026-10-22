@@ -1,0 +1,96 @@
+# Topout's reusable workflow: builds a repo's apps, then deploys them to Topout. Called by the frozen shim
+# (`.github/workflows/topout.yml`, copied from topout-dev/org-template) at `@v1`.
+#
+# - `build` runs the repo's own install and builds, so it holds no deploy permission: `contents: read`,
+#   no `id-token`, and a checkout that keeps no credential.
+# - `deploy` holds only `id-token: write`. It checks nothing out and runs no repo code: it installs the
+#   pinned CLI, downloads `build`'s artifact into a fresh directory, and runs `topout ci deploy`, which
+#   exchanges GitHub's OIDC token for a short-lived Topout credential.
+# - Every action is GitHub's own, pinned to a commit SHA. No cache, and no expression inside a `run:`.
+name: Topout deploy
+
+on:
+  workflow_call:
+    inputs:
+      api-url:
+        description: "The Topout API to deploy to (the shim passes vars.TOPOUT_API_URL); empty means production"
+        type: string
+        required: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The exact CLI version both jobs install and run.
+  TOPOUT_CLI: "1.0.0-alpha.5"
+
+jobs:
+  build:
+    # The default branch only; `deploy` needs this job, so it's skipped with it.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install the Topout CLI
+        run: npm install --prefix "$RUNNER_TEMP/topout" --no-save --ignore-scripts --no-audit --no-fund "topout@$TOPOUT_CLI"
+
+      - name: Install the repo's dependencies
+        run: corepack enable && pnpm install --frozen-lockfile
+
+      - name: Build the apps
+        run: '"$RUNNER_TEMP/topout/node_modules/.bin/topout" ci build'
+
+      - name: Upload the builds
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: topout-ci
+          path: ${{ runner.temp }}/topout-ci/
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    permissions:
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    # One deploy at a time per repo; a newer pending run replaces an older pending one.
+    concurrency:
+      group: topout-deploy-${{ github.repository_id }}
+      cancel-in-progress: false
+    env:
+      TOPOUT_API_URL: ${{ inputs.api-url || 'https://api.topout.ai' }}
+      TOPOUT_API_URL_SOURCE: ${{ inputs.api-url && 'variable' || 'default' }}
+    steps:
+      - name: Set up Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install the Topout CLI
+        run: npm install --prefix "$RUNNER_TEMP/topout" --no-save --ignore-scripts --no-audit --no-fund "topout@$TOPOUT_CLI"
+
+      - name: Download the builds
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: topout-ci
+          path: ${{ runner.temp }}/topout-artifact
+
+      - name: Deploy the apps
+        run: '"$RUNNER_TEMP/topout/node_modules/.bin/topout" ci deploy'
