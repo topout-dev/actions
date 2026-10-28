@@ -23,7 +23,7 @@ defaults:
 
 env:
   # The exact CLI version both jobs install and run.
-  TOPOUT_CLI: "1.0.0-alpha.6"
+  TOPOUT_CLI: "1.0.0-alpha.7"
 
 jobs:
   build:
